@@ -9,6 +9,7 @@ import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.lang.reflect.Array;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -17,6 +18,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Formatter;
 import java.util.HashMap;
+import java.util.List;
 
 import android.content.ContentProvider;
 import android.content.ContentResolver;
@@ -139,133 +141,77 @@ public class SimpleDynamoProvider extends ContentProvider {
 			return null;
 		}
 
+		Log.println(Log.DEBUG, Global.myNode.avdName, "Log for key: "+key+", value: "+value);
+
 		final String[] splitValue = value.split(";");
 		if (splitValue.length == 1){
 			// there are no timestamp;x components
 			// find the responsible coordinator for the key
-			Node keyCoordinator = null;
-			for (int i = 0; i < 5; i++){
-				Node node = Global.nodes.get(i);
-				if(!isFirstGreater(hashedKey, node.avdHash)){ // hashedKey <= node.avdHash
-					keyCoordinator = node;
-					break;
-				}
+			Node keyCoordinator = GetCoordinatorForKey(key);
+			Log.println(Log.DEBUG, "Log","Insert at "+Global.myNode.avdName+", coord: "+keyCoordinator.avdName);
+
+			boolean insertLocally = false;
+			ArrayList<String> nodes = new ArrayList<String>();
+			if (keyCoordinator.avdName.equals(Global.myNode.avdName)){
+				// insert at the start/coordinator
+				Log.println(Log.DEBUG, Global.myNode.avdName, "Iam the coordinator");
+				insertLocally = true;
+				Log.println(Log.DEBUG, Global.myNode.avdName, "Succ1: "+keyCoordinator.succ1.avdName);
+				nodes.add(keyCoordinator.succ1.avdName); // middle
+				Log.println(Log.DEBUG, Global.myNode.avdName, "Succ1: "+keyCoordinator.succ2.avdName);
+				nodes.add(keyCoordinator.succ2.avdName); // end
 			}
-			if(keyCoordinator == null){
-				// this will happen when the hashedKey is greater than the largest node hash. Node 0 is responsble for this key
-				keyCoordinator = Global.nodes.get(0);
+			else{
+				// none in the chain
+				Log.println(Log.DEBUG, Global.myNode.avdName, "");
+				nodes.add(keyCoordinator.avdName); // start
+				nodes.add(keyCoordinator.succ1.avdName); //middle
+				nodes.add(keyCoordinator.succ2.avdName); // end
 			}
 
-			if (keyCoordinator.avdName.equals(Global.myNode.avdName)){
-				// the key need to be inserted on this node
-				final long currentTimestamp = System.currentTimeMillis();
+			/*else if (keyCoordinator.avdName.equals(Global.myNode.pred1.avdName)){
+				// insert in the middle
+				insertLocally = true;
+				nodes.add(keyCoordinator.avdName); // start
+				nodes.add(Global.myNode.succ1.avdName); // end
+			}else if(keyCoordinator.avdName.equals(Global.myNode.pred2.avdName)){
+				// insert in the end
+				insertLocally = true;
+				nodes.add(keyCoordinator.avdName); // start
+				nodes.add(Global.myNode.pred1.avdName); // middle
+			}*/
+
+			final long currentTimestamp = System.currentTimeMillis();
+
+			if(insertLocally){
 				synchronized (RECORDS_FILE) {
 					updateLocalRecord(key, value, currentTimestamp);
 				}
+			}
 
-				final String insertRequest = Constants.MESSAGE_TYPE_INSERT+"-"+key+":"+value+";"+currentTimestamp+";1";
-				final Node finalKeyCoordinator = keyCoordinator;
-
+			RecordRow record = new RecordRow(key, value, currentTimestamp);
+			ArrayList<Thread> threads = new ArrayList<Thread>();
+			for (String node: nodes){
+				InsertRecordIntoNode thread = new InsertRecordIntoNode(node, record);
+				thread.start();
+				threads.add(thread);
+				Log.println(Log.DEBUG, "Log","Forwarding "+record.key+": "+record.value+" to: "+node);
+			}
+			// wait for the threads to finish
+			for (Thread thread: threads){
 				try {
-					RecordRow record = new RecordRow(key, value, currentTimestamp);
-
-					InsertRecordIntoNode thread = new InsertRecordIntoNode(keyCoordinator.succ1.avdName, record);
-					thread.start(); thread.join();
-
-					thread = new InsertRecordIntoNode(keyCoordinator.succ2.avdName, record);
-					thread.start(); thread.join();
+					thread.join();
 				} catch (InterruptedException e) {
 					e.printStackTrace();
 				}
-
-				// send a request to insert locally at the next node
-				// Constants.INSERT-key:value;timestamp;x where x = 1
-
-				/*AsyncTask.execute(new Runnable() {
-					@Override
-					public void run() {
-						try {
-							Socket socToSucc = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-									finalKeyCoordinator.succ1.portNumber);
-							DataInputStream inp = new DataInputStream(new BufferedInputStream(socToSucc.getInputStream()));
-							DataOutputStream out = new DataOutputStream(socToSucc.getOutputStream());
-							out.writeUTF(insertRequest);
-						} catch(Exception exception){
-							Log.println(Log.DEBUG, Global.MY_NODE_ID, "Could not reach succ1:"+finalKeyCoordinator.succ1.avdName);
-							// the message did not to the successor try reaching the succ2
-							try{
-								Log.println(Log.DEBUG, Global.MY_NODE_ID, "Trying to reach succ2:"+finalKeyCoordinator.succ2.avdName);
-								Socket socToSucc2 = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-										finalKeyCoordinator.succ2.portNumber);
-								DataInputStream inp = new DataInputStream(new BufferedInputStream(socToSucc2.getInputStream()));
-								DataOutputStream out = new DataOutputStream(socToSucc2.getOutputStream());
-								String insertRequestSuc2 = Constants.MESSAGE_TYPE_INSERT+"-"+key+":"+value+";"+currentTimestamp+"0";
-								out.writeUTF(insertRequestSuc2);
-							}catch(Exception e){
-								Log.println(Log.DEBUG, Global.MY_NODE_ID, "Could not reach succ2:"+finalKeyCoordinator.succ2.avdName);
-							}
-						}
-					}
-				});*/
-			}else{
-				// open a socket and talk to the coordinator and send an insert message
-				// if the coordinator is not reachable, contact its successor, it must be reachable since just one node can be dead at a time
-				final String insertRequest = Constants.MESSAGE_TYPE_INSERT+"-"+key+":"+value;
-				final Node finalKeyCoordinator1 = keyCoordinator;
-				AsyncTask.execute(new Runnable() {
-					@Override
-					public void run() {
-						try { Socket socToSucc = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-									finalKeyCoordinator1.portNumber);
-							DataInputStream inp = new DataInputStream(new BufferedInputStream(socToSucc.getInputStream()));
-							DataOutputStream out = new DataOutputStream(socToSucc.getOutputStream());
-							out.writeUTF(insertRequest);
-						}catch (Exception e){
-							Log.println(Log.DEBUG, Global.MY_NODE_ID, "Could not reach responsible node:"+finalKeyCoordinator1.avdName);
-							// the coordinator is not reachable, send insert request to its successor
-							try {
-								Socket socToSuccSucc = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-										finalKeyCoordinator1.succ1.portNumber);
-								DataInputStream inp = new DataInputStream(new BufferedInputStream(socToSuccSucc.getInputStream()));
-								DataOutputStream out = new DataOutputStream(socToSuccSucc.getOutputStream());
-								out.writeUTF(insertRequest);
-							}catch(Exception e2){
-								Log.println(Log.DEBUG, Global.MY_NODE_ID, "Could not reach succ of responsible node:"+finalKeyCoordinator1.succ1.avdName);
-							}
-						}
-					}
-				});
 			}
 		}else{
-			// there is a timestamp;x component5
+			// there is a timestamp;x component
 			final long timestamp = Long.parseLong(splitValue[1]);
 			int x = Integer.parseInt(splitValue[2]);
-
 			// insert the key-value;timestamp locally
 			synchronized (RECORDS_FILE) {
 				updateLocalRecord(key, splitValue[0], timestamp);
-			}
-
-			if (x == 1){
-				// connect to the successor and send an insert request like so Constants.INSERT-key:value;timestamp;x, where x = 0
-				AsyncTask.execute(new Runnable() {
-					@Override
-					public void run() {
-						try {
-							Socket socToSucc = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-									Global.myNode.succ1.portNumber);
-							DataInputStream inp = new DataInputStream(new BufferedInputStream(socToSucc.getInputStream()));
-							DataOutputStream out = new DataOutputStream(socToSucc.getOutputStream());
-							String insertRequest = Constants.MESSAGE_TYPE_INSERT+"-"+key+":"+splitValue[0]+";"+timestamp+";0";
-							out.writeUTF(insertRequest);
-						}catch(Exception e){
-							Log.println(Log.DEBUG, Global.MY_NODE_ID, "My successor is not reachable: "+Global.myNode.succ1);
-						}
-					}
-				});
-			}else{
-				// do nothing..
-				Log.println(Log.DEBUG, Global.MY_NODE_ID, "Value inserted at the last node in the chain!");
 			}
 		}
 		return null;
@@ -278,6 +224,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 	@Override
 	public boolean onCreate() {
+		boolean needToSync = recordsExist();
+
 		if(!initializeRecordsFile()){
 			Log.println(Log.DEBUG, "Init", "Could not create the RECORDS_FILE");
 			return false;
@@ -289,7 +237,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 		Global.initialize(portStr);
 
 		// communicate to the neighbours, and sync with them
-		syncWithNeighbours();
+		if (needToSync) {
+			syncWithNeighbours();
+		}
 
 		// start a server on port 10000, and listen for requests(on a thread)
 		try {
@@ -302,6 +252,11 @@ public class SimpleDynamoProvider extends ContentProvider {
 		}
 
 		return false;
+	}
+
+	private boolean recordsExist() {
+		File file = new File(this.getContext().getFilesDir(), RECORDS_FILE);
+		return file.exists();
 	}
 
 	private void syncWithNeighbours() {
@@ -482,6 +437,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			ADDRESS_SELF exists only when the request is to be forcefully handled by this node
 			 */
 			String[] splitKey = selection.split(";");
+			String queryKey = splitKey[0];
 			if (splitKey.length == 2 ){
 				// this node has to take care of serving the request
 				synchronized (RECORDS_FILE) {
@@ -495,22 +451,41 @@ public class SimpleDynamoProvider extends ContentProvider {
 			try {
 				GetKeyFromNode keyFetcherThread = new GetKeyFromNode(coordinator.succ2, selection);
 				keyFetcherThread.start(); keyFetcherThread.join();
+
 				if (keyFetcherThread.cursor == null){
+					Log.println(Log.DEBUG, Global.MY_NODE_ID, "Query to "+coordinator.succ2.avdName +
+							" did not work return anything. key: "+selection);
 					// talk to the immediate successor of the coordinator
-					keyFetcherThread = new GetKeyFromNode(coordinator.succ1, selection);
-					keyFetcherThread.start(); keyFetcherThread.join();
-					if(keyFetcherThread.cursor == null){
+					GetKeyFromNode keyFetcherThread2 = new GetKeyFromNode(coordinator.succ1, selection);
+					keyFetcherThread2.start(); keyFetcherThread2.join();
+					if(keyFetcherThread2.cursor == null){
 						// talk to the coordinator
-						keyFetcherThread = new GetKeyFromNode(coordinator, selection);
-						keyFetcherThread.start(); keyFetcherThread.join();
-						if(keyFetcherThread.cursor == null){
+						Log.println(Log.DEBUG, Global.MY_NODE_ID, "Query to "+coordinator.succ1.avdName +
+								" did not work return anything. key: "+selection);
+						GetKeyFromNode keyFetcherThread3 = new GetKeyFromNode(coordinator, selection);
+						keyFetcherThread3.start(); keyFetcherThread3.join();
+						if(keyFetcherThread3.cursor == null){
 							return null;
-						}else{return dropTimestamp(keyFetcherThread.cursor);}
+						}else{return dropTimestamp(keyFetcherThread3.cursor);}
 					}else{
-						return dropTimestamp(keyFetcherThread.cursor);
+						Cursor res = keyFetcherThread2.cursor;
+						/*res.moveToNext();
+						String ke = res.getString(res.getColumnIndex("key"));
+						String val = res.getString(res.getColumnIndex("value"));
+						String ts = res.getString(res.getColumnIndex("timestamp"));
+						res.moveToFirst();
+						Log.println(Log.DEBUG, Global.myNode.avdHash,"Query result key: "+ke+", val: "+val+", ts: "+ts);*/
+						return dropTimestamp(keyFetcherThread2.cursor);
 					}
 				}else
 				{
+					Cursor res = keyFetcherThread.cursor;
+					/*res.moveToNext();
+					String ke = res.getString(res.getColumnIndex("key"));
+					String val = res.getString(res.getColumnIndex("value"));
+					String ts = res.getString(res.getColumnIndex("timestamp"));
+					Log.println(Log.DEBUG, Global.myNode.avdHash,"Query result key: "+ke+", val: "+val+", ts: "+ts);
+					res.moveToFirst();*/
 					return dropTimestamp(keyFetcherThread.cursor);
 				}
 			} catch (InterruptedException e) {
@@ -590,10 +565,16 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     // ------------------------------------------------Database utility functions -----------------------------------------//
 	private boolean updateLocalRecord(String key, String newValue, long newTimestamp){
+		Log.println(Log.DEBUG, Global.myNode.avdName, "Inserting "+key+", value "+newValue);
 		MatrixCursor existingKeyRecord = fetchLocalRecordForKey(key);
 		if (existingKeyRecord == null) {
+			Log.println(Log.DEBUG, Global.myNode.avdName, key+" does not exist. Adding.");
 			return insertRecordLocally(key, newValue, newTimestamp);
 		} else {
+			existingKeyRecord.moveToNext();
+			String val = existingKeyRecord.getString(existingKeyRecord.getColumnIndex("value"));
+			String tmp = existingKeyRecord.getString(existingKeyRecord.getColumnIndex("timestamp"));
+			Log.println(Log.DEBUG, Global.myNode.avdName, "key: "+key+" found with value: "+val+", "+tmp+". New val: "+newValue+", "+newTimestamp);
 			boolean updateDone = false;
 			MatrixCursor allRecords = readAllLocalRecords();
 			deleteAllLocalRecords();
@@ -633,7 +614,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			Log.println(Log.DEBUG, "Exception:"+Global.MY_NODE_ID, "Could not append the file.");
 			return false;
 		}
-		logLocalRecordContents();
+		//logLocalRecordContents();
 		return true;
 	}
 
@@ -884,6 +865,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 				this.cursor.addRow(new String[]{key, value, timestamp});
 			}catch (Exception e){
 				this.cursor = null;
+				Log.println(Log.DEBUG, Global.MY_NODE_ID, "Node "+this.nodeToQuery.avdName+", failed! "+e.getLocalizedMessage());
 			}
 		}
 	}
@@ -1002,7 +984,6 @@ public class SimpleDynamoProvider extends ContentProvider {
 				int port = Utils.avdNameToPort(this.nodeName);
 				Socket socToSucc = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
 						port);
-				DataInputStream inp = new DataInputStream(new BufferedInputStream(socToSucc.getInputStream()));
 				DataOutputStream out = new DataOutputStream(socToSucc.getOutputStream());
 				out.writeUTF(insertRequest);
 			}catch (Exception e){
