@@ -27,6 +27,7 @@ import android.content.Context;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
+import android.opengl.Matrix;
 import android.os.AsyncTask;
 import android.os.Handler;
 import android.os.Looper;
@@ -55,7 +56,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 			// the delete local records phase consists 2 steps.
 			// We do not want any operation to occur in the middle
-			synchronized (RECORDS_FILE) {
+			synchronized (SimpleDynamoProvider.class) {
 				deleteAllLocalRecords();
 				initializeRecordsFile();
 			}
@@ -68,7 +69,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			 */
 			String[] splitSelection = selection.split(";");
 			if (splitSelection.length == 2){
-				synchronized (RECORDS_FILE) {
+				synchronized (SimpleDynamoProvider.class) {
 					deleteLocalKey(splitSelection[0]);
 				}
 				return 1;
@@ -184,7 +185,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			final long currentTimestamp = System.currentTimeMillis();
 
 			if(insertLocally){
-				synchronized (RECORDS_FILE) {
+				synchronized (SimpleDynamoProvider.class) {
 					updateLocalRecord(key, value, currentTimestamp);
 				}
 			}
@@ -210,7 +211,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			final long timestamp = Long.parseLong(splitValue[1]);
 			int x = Integer.parseInt(splitValue[2]);
 			// insert the key-value;timestamp locally
-			synchronized (RECORDS_FILE) {
+			synchronized (SimpleDynamoProvider.class) {
 				updateLocalRecord(key, splitValue[0], timestamp);
 			}
 		}
@@ -279,7 +280,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			HashMap<String, RecordRow> localRecords = null;
 
 			// get local records
-			synchronized (RECORDS_FILE) {
+			synchronized (SimpleDynamoProvider.class) {
 				// synchronizaton might not be required since syncing is done before the server starts
 				localRecords = getLocalRecords();
 			}
@@ -311,7 +312,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 			if(localRecords.size() != 0) {
 				// write the database with the updated version of the localRecords
-				synchronized (RECORDS_FILE) {
+				synchronized (SimpleDynamoProvider.class) {
 					updateLocalRecords(localRecords);
 				}
 			}
@@ -421,13 +422,13 @@ public class SimpleDynamoProvider extends ContentProvider {
 			Log.println(Log.DEBUG, Global.MY_NODE_ID, "Logging data");
 			//logLocalRecordContents();
 			MatrixCursor records;
-			synchronized (RECORDS_FILE) {
+			synchronized (SimpleDynamoProvider.class) {
 				 records = readAllLocalRecords();
 			}
 			MatrixCursor finalRecords = dropTimestamp(records);
 			return finalRecords;
 		}else if (selection.equals(SELECTION_LOCAL_WITH_TIMESTAMP)) {
-			synchronized (RECORDS_FILE) {
+			synchronized (SimpleDynamoProvider.class) {
 				return readAllLocalRecords();
 			}
 		}else{
@@ -436,12 +437,24 @@ public class SimpleDynamoProvider extends ContentProvider {
 			We may not have Constants.ADDRESS_SELF when the query is passed by grader
 			ADDRESS_SELF exists only when the request is to be forcefully handled by this node
 			 */
+			Log.println(Log.DEBUG, selection, "Query for key: "+selection);
 			String[] splitKey = selection.split(";");
 			String queryKey = splitKey[0];
 			if (splitKey.length == 2 ){
 				// this node has to take care of serving the request
-				synchronized (RECORDS_FILE) {
+				synchronized (SimpleDynamoProvider.class) {
 					MatrixCursor cursor = fetchLocalRecordForKey(splitKey[0]);
+					if (cursor == null){
+						Log.println(Log.DEBUG, selection,"Key : "+splitKey[0]+" not found!");
+						return null;
+					}
+
+					cursor.moveToNext();
+					String value = cursor.getString(cursor.getColumnIndex("value"));
+					String time = cursor.getString(cursor.getColumnIndex("timestamp"));
+					Log.println(Log.DEBUG, selection,"Self result: val: "+value+", time: "+time);
+
+					cursor = fetchLocalRecordForKey(splitKey[0]);
 					return cursor;
 				}
 			}
@@ -450,15 +463,74 @@ public class SimpleDynamoProvider extends ContentProvider {
 			// the reader for the partition taken care of by the coordinator is the coordinator's
 			try {
 				GetKeyFromNode keyFetcherThread = new GetKeyFromNode(coordinator.succ2, selection);
-				keyFetcherThread.start(); keyFetcherThread.join();
+				keyFetcherThread.start();
 
-				if (keyFetcherThread.cursor == null){
+				GetKeyFromNode keyFetcherThread2 = new GetKeyFromNode(coordinator.succ1, selection);
+				keyFetcherThread2.start();
+
+				GetKeyFromNode keyFetcherThread3 = new GetKeyFromNode(coordinator, selection);
+				keyFetcherThread3.start();
+
+				keyFetcherThread.join(); keyFetcherThread2.join();keyFetcherThread3.join();
+
+				String latestVal = null;
+				long latestTimestamp = 0;
+				if(keyFetcherThread.cursor == null){
+					Log.println(Log.DEBUG, selection,"Fetch from "+coordinator.succ2.avdName+" failed");
+				}else{
+					Cursor cursor = keyFetcherThread.cursor;
+					cursor.moveToFirst();
+					String tempVal = cursor.getString(cursor.getColumnIndex("value"));
+					long tempTime = Long.parseLong(cursor.getString(cursor.getColumnIndex("timestamp")));
+					Log.println(Log.DEBUG, selection,"Result by node : "+coordinator.succ2.avdName+" val: "+tempVal+", ts: "+tempTime);
+					if(latestTimestamp < tempTime){
+						latestVal = tempVal;
+						latestTimestamp = tempTime;
+					}
+				}
+
+				if (keyFetcherThread2.cursor == null){
+					Log.println(Log.DEBUG, selection,"Fetch from "+coordinator.succ1.avdName+" failed");
+				}else{
+					Cursor cursor = keyFetcherThread2.cursor;
+					cursor.moveToFirst();
+					String tempVal = cursor.getString(cursor.getColumnIndex("value"));
+					long tempTime = Long.parseLong(cursor.getString(cursor.getColumnIndex("timestamp")));
+					Log.println(Log.DEBUG, selection,"Result by node : "+coordinator.succ1.avdName+" val: "+tempVal+", ts: "+tempTime);
+					if(latestTimestamp < tempTime){
+						latestVal = tempVal;
+						latestTimestamp = tempTime;
+					}
+				}
+
+				if (keyFetcherThread3.cursor == null){
+					Log.println(Log.DEBUG, selection,"Fetch from "+coordinator.avdName+" failed");
+				}else{
+					Cursor cursor = keyFetcherThread3.cursor;
+					cursor.moveToFirst();
+					String tempVal = cursor.getString(cursor.getColumnIndex("value"));
+					long tempTime = Long.parseLong(cursor.getString(cursor.getColumnIndex("timestamp")));
+					Log.println(Log.DEBUG, selection,"Result by node : "+coordinator.avdName+" val: "+tempVal+", ts: "+tempTime);
+					if(latestTimestamp < tempTime){
+						latestVal = tempVal;
+						latestTimestamp = tempTime;
+					}
+				}
+
+				Log.println(Log.DEBUG, selection,"Final res for key: "+selection+" val: "+latestVal+", ts: "+latestTimestamp);
+
+				MatrixCursor finalCursor = new MatrixCursor(new String[]{"key", "value"});
+				finalCursor.addRow(new String[]{selection, latestVal});
+				return finalCursor;
+
+				/*if (keyFetcherThread.cursor == null){
 					Log.println(Log.DEBUG, Global.MY_NODE_ID, "Query to "+coordinator.succ2.avdName +
 							" did not work return anything. key: "+selection);
 					// talk to the immediate successor of the coordinator
 					GetKeyFromNode keyFetcherThread2 = new GetKeyFromNode(coordinator.succ1, selection);
 					keyFetcherThread2.start(); keyFetcherThread2.join();
-					if(keyFetcherThread2.cursor == null){
+					if(keyFetcherThread2.cursor == null){GetKeyFromNode keyFetcherThread3 = new GetKeyFromNode(coordinator, selection);
+						keyFetcherThread3.start(); keyFetcherThread3.join();
 						// talk to the coordinator
 						Log.println(Log.DEBUG, Global.MY_NODE_ID, "Query to "+coordinator.succ1.avdName +
 								" did not work return anything. key: "+selection);
@@ -474,7 +546,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 						String val = res.getString(res.getColumnIndex("value"));
 						String ts = res.getString(res.getColumnIndex("timestamp"));
 						res.moveToFirst();
-						Log.println(Log.DEBUG, Global.myNode.avdHash,"Query result key: "+ke+", val: "+val+", ts: "+ts);*/
+						Log.println(Log.DEBUG, Global.myNode.avdHash,"Query result key: "+ke+", val: "+val+", ts: "+ts);
 						return dropTimestamp(keyFetcherThread2.cursor);
 					}
 				}else
@@ -485,9 +557,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 					String val = res.getString(res.getColumnIndex("value"));
 					String ts = res.getString(res.getColumnIndex("timestamp"));
 					Log.println(Log.DEBUG, Global.myNode.avdHash,"Query result key: "+ke+", val: "+val+", ts: "+ts);
-					res.moveToFirst();*/
+					res.moveToFirst();
 					return dropTimestamp(keyFetcherThread.cursor);
-				}
+				}*/
 			} catch (InterruptedException e) {
 				e.printStackTrace();
 			}
@@ -929,7 +1001,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		@Override
 		public void run() {
-			String request = Constants.MESSAGE_TYPE_SYNC_REQUEST +"-"+this.nodeResponsibleForPartition;
+			String request = Constants.MESSAGE_TYPE_SYNC_REQUEST +"-"+this.nodeResponsibleForPartition+";"+Global.MY_NODE_ID;
 			Socket socketNode = null;
 			int nodeToGetDataFromPort = Utils.avdNameToPort(this.nodeToGetDataFrom);
 			try {
@@ -958,7 +1030,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					RecordRow record = new RecordRow(key, value, timestamp);
 					this.records.put(key, record);
 				}
-
+				socketNode.close();
 			} catch (Exception e) {
 				e.printStackTrace();
 			}

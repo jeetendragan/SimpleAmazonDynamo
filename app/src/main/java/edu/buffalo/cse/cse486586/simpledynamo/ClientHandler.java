@@ -31,6 +31,7 @@ public class ClientHandler implements  Runnable{
             DataOutputStream out = new DataOutputStream(connectionSocket.getOutputStream());
 
             // read the request type
+            while(inp.available() < 0){;}
             String request = inp.readUTF();
             Log.println(Log.DEBUG, Global.MY_NODE_ID+" server", "Request:"+request);
 
@@ -53,7 +54,7 @@ public class ClientHandler implements  Runnable{
                 // call the local content provider to check if data can be inserted on this AVD
                 // else it will be forwarded
                 contentResolver.insert(mUri, cv);
-                //connectionSocket.close();
+                connectionSocket.close();
             }
             if(requestType.equals(Constants.MESSAGE_TYPE_QUERY)){
                 String key = splitRequest[1];
@@ -92,7 +93,9 @@ public class ClientHandler implements  Runnable{
                 }*/
             }
             if(requestType.equals(Constants.MESSAGE_TYPE_SYNC_REQUEST)){
-                String avdToGetDataFrom = splitRequest[1];
+                String[] avds = splitRequest[1].split(";");
+                String avdToGetDataFrom = avds[0];
+                String avdSendingRequest = avds[1];
                 Cursor result = contentResolver.query(mUri, null,
                         SimpleDynamoProvider.SELECTION_LOCAL_WITH_TIMESTAMP,
                         null, null);
@@ -102,6 +105,7 @@ public class ClientHandler implements  Runnable{
                     String filteredData = Utils.filterDataInPartition(result, avdToGetDataFrom);
                     out.writeUTF(filteredData);
                 }
+                Log.println(Log.ERROR, "Server:"+Global.MY_NODE_ID, "Data for sync request sent back");
             }
         } catch (IOException e) {
             //publishProgress(e.getMessage());
