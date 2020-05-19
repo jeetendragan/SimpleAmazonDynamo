@@ -29,4 +29,6 @@ public class Constants {
 
     static final String END_COMMUNICATION = "END_COMMUNICATION";
     public static final String EMPTY_RESULT = "EMPTY";
+
+    public static final String ACK = "ACK";
 }

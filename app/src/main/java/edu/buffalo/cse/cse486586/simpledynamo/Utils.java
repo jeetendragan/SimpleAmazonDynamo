@@ -57,4 +57,88 @@ public class Utils {
         String strResult = sb.deleteCharAt(sb.length() - 1).toString();
         return strResult;
     }
+
+    public static String filterDataInPartition(Cursor result, String[] otherAvds) {
+        StringBuilder sb = new StringBuilder();
+        while(result.moveToNext()){
+            String key = result.getString(result.getColumnIndex("key"));
+            String value = result.getString(result.getColumnIndex("value"));
+            String timestamp = result.getString(result.getColumnIndex("timestamp"));
+            Node coordinator = SimpleDynamoProvider.GetCoordinatorForKey(key);
+
+            boolean filterOut = true;
+
+            for (String otherAvd: otherAvds) {
+                if (coordinator.avdName.equals(otherAvd)) {
+                    filterOut = false; break;
+                }
+            }
+            if(filterOut){
+                continue;
+            }
+            sb.append(key+":"+value+";"+timestamp).append(",");
+        }
+        if(sb.length() == 0){
+            return Constants.EMPTY_RESULT;
+        }
+        String strResult = sb.deleteCharAt(sb.length() - 1).toString();
+        return strResult;
+    }
+
+
+    public static String filterDataInPartitionKeysOnly(Cursor result, String otherAvd) {
+        StringBuilder sb = new StringBuilder();
+        while(result.moveToNext()){
+            String key = result.getString(result.getColumnIndex("key"));
+            String value = result.getString(result.getColumnIndex("value"));
+            String timestamp = result.getString(result.getColumnIndex("timestamp"));
+            Node coordinator = SimpleDynamoProvider.GetCoordinatorForKey(key);
+            if(!coordinator.avdName.equals(otherAvd)){
+                continue;
+            }
+            sb.append(key).append(",");
+        }
+        if(sb.length() == 0){
+            return Constants.EMPTY_RESULT;
+        }
+        String strResult = sb.deleteCharAt(sb.length() - 1).toString();
+        return strResult;
+    }
+
+    public static String filterDataInPartitionKeysOnly(Cursor result, String[] otherAvds) {
+        StringBuilder sb = new StringBuilder();
+        while(result.moveToNext()){
+            String key = result.getString(result.getColumnIndex("key"));
+            String value = result.getString(result.getColumnIndex("value"));
+            String timestamp = result.getString(result.getColumnIndex("timestamp"));
+            Node coordinator = SimpleDynamoProvider.GetCoordinatorForKey(key);
+            boolean filterOut = true;
+
+            for (String otherAvd: otherAvds) {
+                if (coordinator.avdName.equals(otherAvd)) {
+                    filterOut = false; break;
+                }
+            }
+            if(filterOut){
+                continue;
+            }
+            sb.append(key).append(",");
+        }
+        if(sb.length() == 0){
+            return Constants.EMPTY_RESULT;
+        }
+        String strResult = sb.deleteCharAt(sb.length() - 1).toString();
+        return strResult;
+    }
+
+    public static String joinStrings(String[] strings, String sep) {
+        if(strings == null || strings.length == 0) {return null;}
+
+        StringBuilder sb = new StringBuilder();
+        for (String s: strings){
+            sb.append(s+""+sep);
+        }
+        String striped = sb.deleteCharAt(sb.length() - 1).toString();
+        return  striped;
+    }
 }

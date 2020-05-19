@@ -191,7 +191,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			}
 
 			RecordRow record = new RecordRow(key, value, currentTimestamp);
-			ArrayList<Thread> threads = new ArrayList<Thread>();
+			ArrayList<InsertRecordIntoNode> threads = new ArrayList<InsertRecordIntoNode>();
 			for (String node: nodes){
 				InsertRecordIntoNode thread = new InsertRecordIntoNode(node, record);
 				thread.start();
@@ -199,13 +199,18 @@ public class SimpleDynamoProvider extends ContentProvider {
 				Log.println(Log.DEBUG, "Log","Forwarding "+record.key+": "+record.value+" to: "+node);
 			}
 			// wait for the threads to finish
-			for (Thread thread: threads){
+			/*for (Thread thread: threads){
 				try {
 					thread.join();
 				} catch (InterruptedException e) {
 					e.printStackTrace();
 				}
 			}
+
+			for (InsertRecordIntoNode thread: threads){
+				Log.println(Log.DEBUG, "Log","Insert at "+thread.nodeName+" was "+thread.wasSuccessful);
+			}*/
+
 		}else{
 			// there is a timestamp;x component
 			final long timestamp = Long.parseLong(splitValue[1]);
@@ -295,20 +300,31 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 			if(successorRecords == null){
 				// successor does not have anything to add to this node..
+				Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:"+Global.myNode.succ1.avdName+": nothing returned");
 				return;
 			}
+			StringBuffer sbNew = new StringBuffer();
+			StringBuffer sbUpdates = new StringBuffer();
+			StringBuffer  sbDiscarded = new StringBuffer();
 			for (String key : successorRecords.keySet()){
 				RecordRow successorRecord = successorRecords.get(key);
 				RecordRow localRecord = localRecords.get(key);
 				if(localRecord == null){
 					localRecords.put(key, successorRecord);
+					sbNew.append(key+", ");
 				}else{
 					if (localRecord.timestamp < successorRecord.timestamp){
 						localRecord.updateValue(successorRecord.value);
 						localRecord.updateTimestamp(successorRecord.timestamp);
+						sbUpdates.append(key+", ");
+					}else{
+						sbDiscarded.append(key +", ");
 					}
 				}
 			}
+			Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:"+Global.myNode.succ1.avdName+": New additions: "+sbNew.toString());
+			Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:"+Global.myNode.succ1.avdName+": Updates: "+sbUpdates.toString());
+			Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:"+Global.myNode.succ1.avdName+": Discarded: "+sbDiscarded.toString());
 
 			if(localRecords.size() != 0) {
 				// write the database with the updated version of the localRecords
@@ -348,7 +364,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 	private void syncWithPredecessors() {
 		try {
-
+			Log.println(Log.DEBUG, Global.MY_NODE_ID, "Sync with predecessors");
 			HashMap<String, RecordRow> localRecords = getLocalRecords();
 			if (localRecords == null){
 				localRecords = new HashMap<String, RecordRow>();
@@ -372,33 +388,58 @@ public class SimpleDynamoProvider extends ContentProvider {
 			HashMap<String, RecordRow> pred2Records = pred2Fetcher.records;
 
 			if (pred1Records != null) {
+				StringBuffer sbAdds = new StringBuffer();
+				StringBuffer sbUpdates = new StringBuffer();
+				StringBuffer sbDiscarded = new StringBuffer();
 				for (String pred1Key : pred1Records.keySet()) {
 					RecordRow localRecord = localRecords.get(pred1Key);
 					RecordRow pred1Record = pred1Records.get(pred1Key);
 					if (localRecord == null) {
 						localRecords.put(pred1Key, pred1Record);
+						sbAdds.append(", "+pred1Key);
 					} else {
-						if (localRecord.timestamp < pred1Record.timestamp) {
+						if (localRecord.timestamp <= pred1Record.timestamp) {
 							localRecord.updateTimestamp(pred1Record.timestamp);
 							localRecord.updateValue(pred1Record.value);
+							sbUpdates.append(", "+pred1Key);
+						}else{
+							sbDiscarded.append(", "+pred1Key);
 						}
 					}
 				}
+				Log.println(Log.DEBUG, "SYNC", "Syncing with pred1:"+Global.myNode.pred1.avdName+" New additions"+sbAdds.toString());
+				Log.println(Log.DEBUG, "SYNC", "Syncing with pred1:"+Global.myNode.pred1.avdName+" Updates"+sbUpdates.toString());
+				Log.println(Log.DEBUG, "SYNC", "Syncing with pred1:"+Global.myNode.pred1.avdName+" Discards:"+sbDiscarded.toString());
+			}else{
+				Log.println(Log.DEBUG, "SYNC", "Syncing with pred1: "+Global.myNode.pred1.avdName+" returned NULL");
 			}
 
 			if(pred2Records != null) {
+				StringBuffer sbAdds = new StringBuffer();
+				StringBuffer sbUpdates = new StringBuffer();
+				StringBuffer sbDiscarded = new StringBuffer();
 				for (String pred2Key : pred2Records.keySet()) {
 					RecordRow localRecord = localRecords.get(pred2Key);
 					RecordRow pred2Record = pred2Records.get(pred2Key);
 					if (localRecord == null) {
 						localRecords.put(pred2Key, pred2Record);
+						sbAdds.append(", "+pred2Key);
 					} else {
-						if (localRecord.timestamp < pred2Record.timestamp) {
+						if (localRecord.timestamp <= pred2Record.timestamp) {
 							localRecord.updateTimestamp(pred2Record.timestamp);
 							localRecord.updateValue(pred2Record.value);
+							sbUpdates.append(", "+pred2Key);
+						}else{
+							sbDiscarded.append(", "+pred2Key);
 						}
 					}
 				}
+				Log.println(Log.DEBUG, "SYNC", "Syncing with pred2:"+Global.myNode.pred2.avdName+" New additions"+sbAdds.toString());
+				Log.println(Log.DEBUG, "SYNC", "Syncing with pred2:"+Global.myNode.pred2.avdName+" Updates"+sbUpdates.toString());
+				Log.println(Log.DEBUG, "SYNC", "Syncing with pred2:"+Global.myNode.pred2.avdName+" Discards:"+sbDiscarded.toString());
+			}else
+			{
+				Log.println(Log.DEBUG, "SYNC", "Syncing with pred2: "+Global.myNode.pred2.avdName+" returned NULL");
 			}
 			updateLocalRecords(localRecords);
 		}catch (Exception e){
@@ -423,7 +464,13 @@ public class SimpleDynamoProvider extends ContentProvider {
 			//logLocalRecordContents();
 			MatrixCursor records;
 			synchronized (SimpleDynamoProvider.class) {
-				 records = readAllLocalRecords();
+				String log = logLocalKeys();
+				if(log == null){
+					Log.println(Log.DEBUG, selection,"No keys");
+				}else{
+					Log.println(Log.DEBUG, selection,"Keys available: "+log);
+				}
+				records = readAllLocalRecords();
 			}
 			MatrixCursor finalRecords = dropTimestamp(records);
 			return finalRecords;
@@ -565,6 +612,43 @@ public class SimpleDynamoProvider extends ContentProvider {
 			}
 		}
 		return null;
+	}
+
+	private String logLocalKeys() {
+		StringBuilder log = new StringBuilder();
+		File file = new File(this.getContext().getFilesDir(), RECORDS_FILE);
+		try {
+			FileReader reader = new FileReader(file);
+			BufferedReader bufferedReader = new BufferedReader(reader);
+			String line = null;
+			int recordCount = 0;
+			while ((line = bufferedReader.readLine()) != null) {
+				// Log.println(Log.DEBUG, "RECORD_ROW", line);
+				String[] splitLine = line.split(":");
+				log.append(splitLine[0]);
+				recordCount++;
+			}
+
+			if (recordCount == 0) {
+				return null;
+			}
+
+			bufferedReader.close();
+			reader.close();
+		} catch (FileNotFoundException e) {
+			e.printStackTrace();
+			Log.println(Log.ERROR, "Exception:" + Global.MY_NODE_ID, "FileNotFound");
+			return null;
+		} catch (IOException e) {
+			e.printStackTrace();
+			Log.println(Log.ERROR, "Exception:" + Global.MY_NODE_ID, "IOExc");
+			return null;
+		}catch (Exception e){
+			e.printStackTrace();
+			Log.println(Log.ERROR, "Unknown Exception:" + Global.MY_NODE_ID, "unknown exception when logging data");
+			return null;
+		}
+		return log.toString();
 	}
 
 	private MatrixCursor dropTimestamp(MatrixCursor records) {
@@ -992,16 +1076,18 @@ public class SimpleDynamoProvider extends ContentProvider {
 	public class GetDataFromNodeForGivenPartition extends Thread{
 
 		public HashMap<String, RecordRow> records = null;
-		String nodeToGetDataFrom, nodeResponsibleForPartition;
+		String nodeToGetDataFrom;
+		String[] getDataForPartitions;
 
-		GetDataFromNodeForGivenPartition(String nodeToGetDataFrom, String nodeResponsibleForPartition){
+		GetDataFromNodeForGivenPartition(String nodeToGetDataFrom, String[] dataForPartitions){
 			this.nodeToGetDataFrom = nodeToGetDataFrom;
-			this.nodeResponsibleForPartition = nodeResponsibleForPartition;
+			this.getDataForPartitions = dataForPartitions;
 		}
 
 		@Override
 		public void run() {
-			String request = Constants.MESSAGE_TYPE_SYNC_REQUEST +"-"+this.nodeResponsibleForPartition+";"+Global.MY_NODE_ID;
+			String result = Utils.joinStrings(getDataForPartitions, ";");
+			String request = Constants.MESSAGE_TYPE_SYNC_REQUEST +"-"+result;
 			Socket socketNode = null;
 			int nodeToGetDataFromPort = Utils.avdNameToPort(this.nodeToGetDataFrom);
 			try {
@@ -1043,10 +1129,12 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		String nodeName;
 		RecordRow recordRow;
+		boolean wasSuccessful;
 
 		InsertRecordIntoNode(String nodeName, RecordRow recordRow){
 			this.nodeName = nodeName;
 			this.recordRow = recordRow;
+			wasSuccessful = false;
 		}
 
 		@Override
@@ -1056,10 +1144,15 @@ public class SimpleDynamoProvider extends ContentProvider {
 				int port = Utils.avdNameToPort(this.nodeName);
 				Socket socToSucc = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
 						port);
+				DataInputStream inp = new DataInputStream(new BufferedInputStream(socToSucc.getInputStream()));
 				DataOutputStream out = new DataOutputStream(socToSucc.getOutputStream());
 				out.writeUTF(insertRequest);
-			}catch (Exception e){
 
+				while(inp.available() < 0){;}
+				String response = inp.readUTF();
+				this.wasSuccessful = (response.equals(Constants.ACK));
+			}catch (Exception e){
+				this.wasSuccessful = false;
 			}
 		}
 	}
