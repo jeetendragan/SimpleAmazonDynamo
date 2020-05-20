@@ -244,7 +244,15 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		// communicate to the neighbours, and sync with them
 		if (needToSync) {
-			syncWithNeighbours();
+			// lock some global variable
+			AsyncTask.execute(new Runnable() {
+				@Override
+				public void run() {
+					synchronized (SimpleDynamoProvider.class) {
+						syncWithNeighbours(); // inside the thread, when it is done, unlock it
+					}
+				}
+			});
 		}
 
 		// start a server on port 10000, and listen for requests(on a thread)
@@ -276,61 +284,98 @@ public class SimpleDynamoProvider extends ContentProvider {
 	private void syncWithSuccessors() {
 		// ask the immediate successor for the key, values stored in my partition
 		try {
-			GetDataFromNodeForGivenPartition thread = new GetDataFromNodeForGivenPartition(
+			GetDataFromNodeForGivenPartition thread1 = new GetDataFromNodeForGivenPartition(
 					Global.myNode.succ1.avdName,
-					Global.myNode.avdName);
-			thread.start();
-			thread.join();
+					new String[]{Global.myNode.avdName, Global.myNode.pred1.avdName});
+			thread1.start();
+
+			GetDataFromNodeForGivenPartition thread2 = new GetDataFromNodeForGivenPartition(
+					Global.myNode.succ2.avdName,
+					new String[]{Global.myNode.avdName}
+			);
+			thread2.start();
+
+			thread1.join();
+			thread2.join();
 
 			HashMap<String, RecordRow> localRecords = null;
-
 			// get local records
-			synchronized (SimpleDynamoProvider.class) {
-				// synchronizaton might not be required since syncing is done before the server starts
-				localRecords = getLocalRecords();
-			}
+
+			// synchronizaton might not be required since syncing is done before the server starts
+			localRecords = getLocalRecords();
+
 			if(localRecords == null){
 				// there might be a case when nothing is present in this node but the successor is more updated.
 				// add whatever data that it has
 				localRecords = new HashMap<String, RecordRow>();
 			}
 
-			// sync up
-			HashMap<String, RecordRow> successorRecords = thread.records;
+			// sync up with succ1
+			HashMap<String, RecordRow> successor1Records = thread1.records;
 
-			if(successorRecords == null){
+			if(successor1Records == null){
 				// successor does not have anything to add to this node..
 				Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:"+Global.myNode.succ1.avdName+": nothing returned");
-				return;
-			}
-			StringBuffer sbNew = new StringBuffer();
-			StringBuffer sbUpdates = new StringBuffer();
-			StringBuffer  sbDiscarded = new StringBuffer();
-			for (String key : successorRecords.keySet()){
-				RecordRow successorRecord = successorRecords.get(key);
-				RecordRow localRecord = localRecords.get(key);
-				if(localRecord == null){
-					localRecords.put(key, successorRecord);
-					sbNew.append(key+", ");
-				}else{
-					if (localRecord.timestamp < successorRecord.timestamp){
-						localRecord.updateValue(successorRecord.value);
-						localRecord.updateTimestamp(successorRecord.timestamp);
-						sbUpdates.append(key+", ");
-					}else{
-						sbDiscarded.append(key +", ");
+			}else {
+				StringBuffer sbNew = new StringBuffer();
+				StringBuffer sbUpdates = new StringBuffer();
+				StringBuffer sbDiscarded = new StringBuffer();
+				for (String key : successor1Records.keySet()) {
+					RecordRow successorRecord = successor1Records.get(key);
+					RecordRow localRecord = localRecords.get(key);
+					if (localRecord == null) {
+						localRecords.put(key, successorRecord);
+						sbNew.append(key + ", ");
+					} else {
+						if (localRecord.timestamp < successorRecord.timestamp) {
+							localRecord.updateValue(successorRecord.value);
+							localRecord.updateTimestamp(successorRecord.timestamp);
+							sbUpdates.append(key + ", ");
+						} else {
+							sbDiscarded.append(key + ", ");
+						}
 					}
 				}
+				Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:" + Global.myNode.succ1.avdName + ": New additions: " + sbNew.toString());
+				Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:" + Global.myNode.succ1.avdName + ": Updates: " + sbUpdates.toString());
+				Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:" + Global.myNode.succ1.avdName + ": Discarded: " + sbDiscarded.toString());
 			}
-			Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:"+Global.myNode.succ1.avdName+": New additions: "+sbNew.toString());
-			Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:"+Global.myNode.succ1.avdName+": Updates: "+sbUpdates.toString());
-			Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:"+Global.myNode.succ1.avdName+": Discarded: "+sbDiscarded.toString());
+
+
+			// sync up with succ 2
+			HashMap<String, RecordRow> successor2Records = thread2.records;
+
+			if(successor2Records == null){
+				// successor does not have anything to add to this node..
+				Log.println(Log.DEBUG, "SYNC", "Syncing with succ2:"+Global.myNode.succ2.avdName+": nothing returned");
+			}else {
+				StringBuffer sbNew = new StringBuffer();
+				StringBuffer sbUpdates = new StringBuffer();
+				StringBuffer sbDiscarded = new StringBuffer();
+				for (String key : successor2Records.keySet()) {
+					RecordRow successorRecord = successor2Records.get(key);
+					RecordRow localRecord = localRecords.get(key);
+					if (localRecord == null) {
+						localRecords.put(key, successorRecord);
+						sbNew.append(key + ", ");
+					} else {
+						if (localRecord.timestamp <= successorRecord.timestamp) {
+							localRecord.updateValue(successorRecord.value);
+							localRecord.updateTimestamp(successorRecord.timestamp);
+							sbUpdates.append(key + ", ");
+						} else {
+							sbDiscarded.append(key + ", ");
+						}
+					}
+				}
+				Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:" + Global.myNode.succ2.avdName + ": New additions: " + sbNew.toString());
+				Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:" + Global.myNode.succ2.avdName + ": Updates: " + sbUpdates.toString());
+				Log.println(Log.DEBUG, "SYNC", "Syncing with succ1:" + Global.myNode.succ2.avdName + ": Discarded: " + sbDiscarded.toString());
+			}
+
 
 			if(localRecords.size() != 0) {
-				// write the database with the updated version of the localRecords
-				synchronized (SimpleDynamoProvider.class) {
-					updateLocalRecords(localRecords);
-				}
+				updateLocalRecords(localRecords);
 			}
 
 		} catch (InterruptedException e) {
@@ -373,14 +418,14 @@ public class SimpleDynamoProvider extends ContentProvider {
 			// get data in the partition of predecessor1 from predecessor1
 			GetDataFromNodeForGivenPartition pred1Fetcher = new GetDataFromNodeForGivenPartition(
 					Global.myNode.pred1.avdName,
-					Global.myNode.pred1.avdName
+					new String[]{Global.myNode.pred1.avdName, Global.myNode.pred2.avdName}
 			);
 			pred1Fetcher.start();pred1Fetcher.join();
 
 			// get data in the partition of predecessor2 from predecessor2
 			GetDataFromNodeForGivenPartition pred2Fetcher = new GetDataFromNodeForGivenPartition(
 					Global.myNode.pred2.avdName,
-					Global.myNode.pred2.avdName
+					new String[]{Global.myNode.pred2.avdName}
 			);
 			pred2Fetcher.start(); pred2Fetcher.join();
 
@@ -476,6 +521,12 @@ public class SimpleDynamoProvider extends ContentProvider {
 			return finalRecords;
 		}else if (selection.equals(SELECTION_LOCAL_WITH_TIMESTAMP)) {
 			synchronized (SimpleDynamoProvider.class) {
+				String log = logLocalKeys();
+				if(log == null){
+					Log.println(Log.DEBUG, selection,"No keys");
+				}else{
+					Log.println(Log.DEBUG, selection,"Keys available(CASE: SYNC req): "+log);
+				}
 				return readAllLocalRecords();
 			}
 		}else{
@@ -1119,6 +1170,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 				socketNode.close();
 			} catch (Exception e) {
 				e.printStackTrace();
+				Log.println(Log.ERROR, "SYNC Exception", "SYNC exception!");
 			}
 
 		}
